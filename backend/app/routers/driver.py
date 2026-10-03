@@ -87,26 +87,36 @@ def label_trip(
     driver: Driver = Depends(get_current_driver),
     db: Session = Depends(get_db),
 ):
-    trip = db.query(Trip).filter(Trip.id == trip_id, Trip.driver_id == driver.id).first()
+    # Row lock: a second label request waits here and then sees status "processing"
+    trip = (
+        db.query(Trip)
+        .filter(Trip.id == trip_id, Trip.driver_id == driver.id)
+        .with_for_update()
+        .first()
+    )
     if not trip:
         raise HTTPException(status_code=404, detail="Trip not found")
 
     trip.trip_type = request.trip_type
     trip.label_source = "user"
-    db.commit()
 
     status = "relabelled"
     if request.trip_type == "passenger":
         status = "removed_from_score"
     elif request.trip_type == "driver":
         status = "added_to_score"
-        # An unscored, finished trip labelled as driver needs processing to produce a
-        # score. Trips still uploading/processing pick up the user label when they run.
-        if trip.score is None and trip.status in ("done", "failed"):
-            if trip.features is not None:
-                db.delete(trip.features)
-                db.commit()
-            background_tasks.add_task(process_trip, trip_id)
+    # An unscored, finished trip labelled as driver needs processing to produce a score.
+    # Trips still uploading/processing pick up the user label when they run.
+    needs_run = (
+        request.trip_type == "driver" and trip.score is None and trip.status in ("done", "failed")
+    )
+    if needs_run:
+        if trip.features is not None:
+            db.delete(trip.features)
+        trip.status = "processing"
+    db.commit()
+    if needs_run:
+        background_tasks.add_task(process_trip, trip_id)
 
     return TripLabelResponse(
         trip_id=trip.id,

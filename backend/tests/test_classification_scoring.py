@@ -386,3 +386,23 @@ def test_incident_confirm_rejects_invalid_value():
         json={"confirmed": "maybe"},
     )
     assert response.status_code == 422
+
+
+def test_label_twice_schedules_processing_once():
+    _driver_id, api_key = _register_and_consent()
+    trip_id = _upload_trip(api_key, [])
+    with SessionLocal() as db:
+        trip = db.get(Trip, trip_id)
+        assert trip is not None
+        trip.status = "done"
+        db.commit()
+
+    with unittest.mock.patch("app.routers.driver.BackgroundTasks.add_task") as mock_add_task:
+        for _ in range(2):
+            response = client.post(
+                f"/v1/me/trips/{trip_id}/label",
+                headers={"X-API-Key": api_key},
+                json={"trip_type": "driver"},
+            )
+            assert response.status_code == 200
+        mock_add_task.assert_called_once()
