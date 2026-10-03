@@ -39,12 +39,12 @@ def _remove_gravity(imu_df: pd.DataFrame, window_s: float = 10.0, fs: float = 50
     return imu_df
 
 
-
 def _gravity_unit(imu_df: pd.DataFrame) -> np.ndarray:
     """Per-sample unit vector along gravity, from the grav_* columns set by _remove_gravity."""
     grav = imu_df[["grav_x", "grav_y", "grav_z"]].to_numpy(dtype=float)
     norm = np.linalg.norm(grav, axis=1, keepdims=True)
     return np.divide(grav, norm, out=np.zeros_like(grav), where=norm > 0)
+
 
 def _rotate_to_car_frame(imu_df: pd.DataFrame, gps_df: pd.DataFrame) -> pd.DataFrame:
     """
