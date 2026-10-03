@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from app.config import get_settings
 from app.database import SessionLocal
 from app.main import app
-from app.models import Incident, Trip
+from app.models import Incident, Trip, TripScore
 
 client = TestClient(app)
 
@@ -406,3 +406,27 @@ def test_label_twice_schedules_processing_once():
             )
             assert response.status_code == 200
         mock_add_task.assert_called_once()
+
+
+def test_unconfirmed_trip_hides_score_until_labelled():
+    _driver_id, api_key = _register_and_consent()
+    trip_id = _upload_trip(api_key, [])
+    with SessionLocal() as db:
+        db.add(TripScore(trip_id=trip_id, confidence=0.1, score=90, tier="A", model_version="t"))
+        trip = db.get(Trip, trip_id)
+        assert trip is not None
+        trip.status = "done"
+        trip.trip_type = "unknown"
+        db.commit()
+    headers = {"X-API-Key": api_key}
+
+    item = client.get("/v1/me/trips", headers=headers).json()[0]
+    assert item["needs_confirmation"] is True
+    assert item["score"] is None
+    assert item["tier"] is None
+    assert client.get(f"/v1/me/trips/{trip_id}", headers=headers).json()["score"] is None
+
+    client.post(f"/v1/me/trips/{trip_id}/label", headers=headers, json={"trip_type": "driver"})
+    item = client.get("/v1/me/trips", headers=headers).json()[0]
+    assert item["score"] == 90
+    assert item["tier"] == "A"

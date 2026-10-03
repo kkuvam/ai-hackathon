@@ -145,8 +145,8 @@ def get_insurer_driver_detail(
             trip_id=t.id,
             started_at=t.started_at,
             distance_km=t.features.features.get("distance_km", 0) if t.features else 0,
-            score=s.score if s else None,
-            tier=s.tier if s else None,
+            score=s.score if s and is_scoreable(t) else None,
+            tier=s.tier if s and is_scoreable(t) else None,
             trip_type=t.trip_type,
             needs_confirmation=(
                 t.trip_type == "unknown" and t.label_source != "user" and not is_expired_unknown(t)

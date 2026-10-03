@@ -14,7 +14,12 @@ from app.schemas import (
     TripLabelResponse,
     TripListItem,
 )
-from app.services.scoring import calculate_driver_score, generate_explanation, is_expired_unknown
+from app.services.scoring import (
+    calculate_driver_score,
+    generate_explanation,
+    is_expired_unknown,
+    is_scoreable,
+)
 
 router = APIRouter()
 
@@ -57,7 +62,9 @@ def get_my_trips(
     )
 
     items = []
-    for trip, score in trips:
+    for trip, trip_score in trips:
+        # Unconfirmed trips do not count, so their score is not shown yet
+        score = trip_score if is_scoreable(trip) else None
         needs_confirmation = (
             trip.trip_type == "unknown"
             and trip.label_source != "user"
@@ -135,7 +142,7 @@ def get_my_trip_detail(
     if not trip:
         raise HTTPException(status_code=404, detail="Trip not found")
 
-    score = trip.score
+    score = trip.score if is_scoreable(trip) else None
     events = trip.events
     features = trip.features.features if trip.features else {}
 
