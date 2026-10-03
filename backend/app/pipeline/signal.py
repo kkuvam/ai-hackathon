@@ -26,22 +26,33 @@ def _remove_gravity(imu_df: pd.DataFrame, window_s: float = 10.0, fs: float = 50
     """
     Remove gravity/DC offset by subtracting a rolling median from each raw axis.
     Orientation-independent: works however the phone is mounted.
+    The accelerometer median (gravity) is kept as grav_x/grav_y/grav_z for the car-frame step.
     """
     imu_df = imu_df.copy()
     window = int(fs * window_s)
     for col in ["ax", "ay", "az", "gx", "gy", "gz"]:
         if col in imu_df.columns:
             rolling_median = imu_df[col].rolling(window=window, center=True, min_periods=1).median()
+            if col in ("ax", "ay", "az"):
+                imu_df[f"grav_{col[1]}"] = rolling_median
             imu_df[col] = imu_df[col] - rolling_median
     return imu_df
 
+
+
+def _gravity_unit(imu_df: pd.DataFrame) -> np.ndarray:
+    """Per-sample unit vector along gravity, from the grav_* columns set by _remove_gravity."""
+    grav = imu_df[["grav_x", "grav_y", "grav_z"]].to_numpy(dtype=float)
+    norm = np.linalg.norm(grav, axis=1, keepdims=True)
+    return np.divide(grav, norm, out=np.zeros_like(grav), where=norm > 0)
 
 def _rotate_to_car_frame(imu_df: pd.DataFrame, gps_df: pd.DataFrame) -> pd.DataFrame:
     """
     Derive car-frame acceleration channels (all in g, matching the event thresholds):
     - accel_forward: dv/dt from GPS speed over ~2s windows, interpolated onto the IMU timeline
-    - accel_lateral: yaw rate (gravity-free gz, rad/s) x GPS speed (m/s)
-    - accel_vertical: gravity-free az
+    - accel_lateral: yaw rate (gravity-free gyro about the gravity axis, rad/s) x GPS speed (m/s),
+      so corners are found however the phone is mounted
+    - accel_vertical: gravity-free acceleration along the gravity axis
     """
     imu_df = imu_df.copy()
 
@@ -66,10 +77,15 @@ def _rotate_to_car_frame(imu_df: pd.DataFrame, gps_df: pd.DataFrame) -> pd.DataF
         accel_forward_ms2 = np.zeros(len(imu_df))
         speed_on_imu = np.zeros(len(imu_df))
 
+    # Project onto the gravity axis so the result does not depend on how the phone is mounted
+    up = _gravity_unit(imu_df)
+    yaw = np.sum(imu_df[["gx", "gy", "gz"]].to_numpy(dtype=float) * up, axis=1)
+    vertical = np.sum(imu_df[["ax", "ay", "az"]].to_numpy(dtype=float) * up, axis=1)
+
     # Convert m/s^2 to g so the g-unit thresholds apply
     imu_df["accel_forward"] = accel_forward_ms2 / 9.81
-    imu_df["accel_lateral"] = imu_df["gz"].values * speed_on_imu / 9.81
-    imu_df["accel_vertical"] = imu_df["az"].values
+    imu_df["accel_lateral"] = yaw * speed_on_imu / 9.81
+    imu_df["accel_vertical"] = vertical
     return imu_df
 
 

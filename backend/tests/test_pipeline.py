@@ -6,10 +6,13 @@ import pytest
 
 from app.pipeline import (
     PipelineError,
+    _apply_lowpass_filter,
     _calculate_distance_km,
     _calculate_features,
     _detect_events,
+    _remove_gravity,
     _resample_imu,
+    _rotate_to_car_frame,
     _validate_features,
 )
 
@@ -220,3 +223,39 @@ def test_validate_features_invalid_raises_short_pipeline_error():
 
     assert str(exc.value) == "feature contract violated: night_driving_share"
     assert "\n" not in str(exc.value)
+
+
+@pytest.mark.parametrize("up_axis", ["z", "y"])
+def test_sharp_corner_found_for_flat_and_upright_phone(up_axis):
+    """A 3 s, 0.5 rad/s turn at 10 m/s (~0.5 g) is a corner however the phone is mounted."""
+    fs = 50
+    t = np.arange(0, 60_000, 1000 / fs)
+    yaw = np.where((t >= 30_000) & (t < 33_000), 0.5, 0.0)
+    zeros = np.zeros(len(t))
+    imu_df = pd.DataFrame(
+        {
+            "t": t,
+            "ax": zeros,
+            "ay": zeros + (1.0 if up_axis == "y" else 0.0),
+            "az": zeros + (1.0 if up_axis == "z" else 0.0),
+            "gx": zeros,
+            "gy": yaw if up_axis == "y" else zeros,
+            "gz": yaw if up_axis == "z" else zeros,
+        }
+    )
+    gps_t = np.arange(0, 60_000, 1000)
+    gps_df = pd.DataFrame(
+        {
+            "t": gps_t,
+            "lat": 22.3 + gps_t / 1000 * 10 / 111_320,
+            "lon": np.full(len(gps_t), 114.1),
+            "speed": np.full(len(gps_t), 10.0),
+        }
+    )
+
+    imu_df = _apply_lowpass_filter(
+        _rotate_to_car_frame(_remove_gravity(_resample_imu(imu_df)), gps_df)
+    )
+    events = _detect_events(imu_df, gps_df)
+
+    assert [e["type"] for e in events] == ["sharp_corner"]
