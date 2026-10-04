@@ -1,6 +1,6 @@
 # DriveScore
 
-Usage-based car insurance proof of concept for the bolttech hackathon (Hong Kong).
+Usage-based car insurance proof of concept for the HKAI Summit hackathon (Hong Kong).
 
 DriveScore turns phone sensor data into a driving-risk score, and the score into a premium
 multiplier. This repository holds the FastAPI + PostgreSQL backend (ingestion, signal
