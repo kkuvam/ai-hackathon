@@ -65,7 +65,9 @@ dashboard login hardening, and rewritten handoff docs (G1); see [Roadmap](#13-ro
  +-------------------------------+-----------------------------------+
                                  v
                   app/model.py predict(features)
-                  placeholder rules  OR  models/model.pkl
+                  placeholder rules  OR  models/model.pkl (MODEL_PATH)
+                  OR  window model (MODEL_KIND=window, v2 default):
+                  250-sample windows, share with risk > 0.5 -> confidence
                                  v
               confidence (0..1) -> score (0..100) -> tier A..E
                                  |
@@ -97,6 +99,13 @@ Trip lifecycle (`trips.status`): `uploading` -> `processing` -> `done` or `faile
 |   |-- data-model.md            detailed data model: ER diagram, tables, allowed values
 |   `-- handoff.md               older team handoff guide (stale, see limitations)
 |-- contracts/                   older hand-written API contract (stale, replaced by OpenAPI)
+|-- model/                       window model: research, training, artifacts (see model/README.md)
+|   |-- README.md, TRAINING.md   overview; findings, assumptions, retraining record
+|   |-- remade_model/            v1 model.json + serve.py (reference scorer)
+|   |-- retrained_model/         v2 model.json + metrics.json (served by default)
+|   |-- retrain/                 v2 feature and training code (features_v2.py, train_v2.py, ...)
+|   |-- eval_ferreira.py         evaluation on the Ferreira 2017 phone events
+|   `-- data/                    external datasets (gitignored, not in the repo)
 |-- backend/                     FastAPI service (see backend/README.md)
 |   |-- app/
 |   |   |-- main.py              app, CORS, router mounting, /health, model load on startup
@@ -112,6 +121,8 @@ Trip lifecycle (`trips.status`): `uploading` -> `processing` -> `done` or `faile
 |   |   |-- services/scoring.py  driver score, scoreable trips, passenger stats, explanations
 |   |   |-- classify.py          driver / unknown classification
 |   |   |-- model.py             model plug-in point, FEATURE_ORDER, score/tier/multiplier
+|   |   |-- window_model.py      window model loader and v1 scorer (MODEL_KIND=window)
+|   |   |-- window_features_v2.py  v2 window features and scorer
 |   |   `-- routers/
 |   |       |-- ingestion.py     register, consent, trip start / chunks / end / status
 |   |       |-- driver.py        /me summary, trips, trip detail, labelling, DELETE /me
@@ -139,7 +150,10 @@ Trip lifecycle (`trips.status`): `uploading` -> `processing` -> `done` or `faile
         |-- sensors/SensorManager.ts   accelerometer / gyroscope / GPS-speed subscriptions
         |-- sensors/TripDetector.ts    trip start/end by speed, chunking and upload
         |-- screens/             Onboarding, Home, Trips, Trip detail, Coach, Privacy
-        |-- i18n/                en, zh-CN, zh-HK strings and language picker
+        |-- AppHeader.tsx        BT header with language button, on every screen
+        |-- LanguagePicker.tsx   language picker, opened from the header
+        |-- connectivity.ts      offline detection (drives the offline banner)
+        |-- i18n/                en, zh-CN, zh-HK strings
         |-- reminders.ts         daily trip reminder (expo-notifications)
         |-- theme.ts, ui.tsx     BT StyleSheet theme and shared primitives
         `-- types.ts             sensor sample types
@@ -156,7 +170,7 @@ Trip lifecycle (`trips.status`): `uploading` -> `processing` -> `done` or `faile
 | ORM / driver | SQLAlchemy (sync), psycopg 3 | 2.0.35, >=3.3.6 |
 | Migrations | Alembic | 1.13.0 |
 | Signal processing | numpy, pandas, scipy | 1.26.4, 2.2.3, 1.13.1 |
-| Model | pluggable pickle (scikit-learn style), placeholder rules by default | n/a |
+| Model | placeholder rules by default; optional pickle (`MODEL_PATH`) or the JSON window model (logistic regression v2, numpy/scipy serving) via `MODEL_KIND=window` | n/a |
 | Mobile | Expo SDK ~51, React Native 0.74.0, React 18.2.0, TypeScript ~5.3.3 | see `mobile/package.json` |
 | Mobile libs | expo-sensors ~13.0, expo-location ~17.0, async-storage 1.23.1, `StyleSheet` theme | |
 | Package manager | uv (backend), npm (mobile) | |
@@ -205,11 +219,9 @@ docker compose up -d db
 cd backend
 uv sync
 cp .env.example .env
-#   edit .env: set SESSION_SECRET (see table below), and set
-#   DATABASE_URL=postgresql+psycopg://drivescore:drivescore@localhost:5432/drivescore
-#   TEST_DATABASE_URL=postgresql+psycopg://drivescore:drivescore@localhost:5432/drivescore_test
-#   (backend/.env.example is still on SQLite: replace the DATABASE_URL line and add the
-#   TEST_DATABASE_URL line; the app only works with PostgreSQL.)
+#   edit .env: set SESSION_SECRET (see table below)
+#   (.env.example already points DATABASE_URL and TEST_DATABASE_URL at the compose PostgreSQL;
+#   the app only works with PostgreSQL.)
 
 # 3. Create the schema (the app does not create tables itself)
 uv run alembic upgrade head
@@ -362,8 +374,10 @@ AsyncStorage. After that a bottom tab bar offers:
 - **Privacy**: what data is collected, daily trip reminder (local notification), and "delete all my
   data" with an inline confirm (`DELETE /v1/me`); deletion is blocked while recording.
 
-The UI is available in English, Simplified Chinese (zh-CN) and Traditional Chinese (zh-HK), with a
-language picker.
+The UI is available in English, Simplified Chinese (zh-CN) and Traditional Chinese (zh-HK). The
+language picker is opened from the header button, which is on every screen including onboarding.
+When the API cannot be reached the app shows an offline banner and keeps the last loaded data
+visible. Trips rows show distance and duration.
 
 Turn on the "I'm driving" switch before you drive. While it is on, every uploaded chunk carries
 `car_connected: true`; while it is off, every chunk carries `car_connected: false`. The choice is
@@ -835,8 +849,6 @@ This is a hackathon POC. Be aware of the following.
   is no TLS or reverse proxy.
 - Timestamps are timezone-aware UTC (`timestamptz`; API datetimes end in `Z`). Night driving
   converts to Asia/Hong_Kong.
-- `backend/.env.example` is still on SQLite; set the PostgreSQL `DATABASE_URL` and
-  `TEST_DATABASE_URL` yourself (see Option B).
 
 **Signal processing**
 - The lateral acceleration uses the gyro `gz` axis as yaw rate, so it assumes the phone's
@@ -860,7 +872,12 @@ This is a hackathon POC. Be aware of the following.
 **Security and data**
 - Anyone can call `register`; there is no rate limiting. Dashboard login has no rate limiting or
   lockout yet (roadmap "Later" item).
-- The model is loaded with `pickle`; only deploy trusted model files.
+- A `MODEL_PATH` model is loaded with `pickle`; only deploy trusted model files. The window
+  model is plain JSON.
+- Model: the window model's labels are synthetic injected pulses (VED), so it is a demo signal,
+  not a validated risk measure. Its 0.5 threshold is calibrated at an artificial 50% prevalence.
+  The only real-phone check is 69 Ferreira events from 2 drivers (evaluation only). See
+  `model/TRAINING.md`.
 - Insurer listing computes each driver's score in a loop, which will not scale beyond
   hundreds of drivers.
 
@@ -882,7 +899,11 @@ Full plan and status in [docs/roadmap.md](docs/roadmap.md). One line is one smal
   redesign: StyleSheet theme, i18n, tabs, onboarding with consent, Privacy delete, daily
   reminders); privacy Option B (no coordinates) and `DELETE /v1/me`; insurer dashboard phase F
   (staff login, overview, drivers, trip detail, incidents; Jinja2 + HTMX + Alpine.js + UnoCSS).
-- Open: dashboard hardening (login rate limiting, session revocation, CSP); docs (phase G):
+- Done: follow-ups (chunk field renamed to `speed_samples`, trip `duration_min`, offline banner,
+  mobile lockfile, `ty` clean), language picker in the header on every screen; phase ML (ML1 window
+  model wired behind `MODEL_KIND`, v2 retrain with orientation-robust features, ML2 v2 served).
+- Open: own labelled drives recorded with the BT app, threshold recalibration for real
+  prevalence, real-device testing; dashboard hardening (login rate limiting, session revocation, CSP); docs (phase G):
   regenerate handoff and contracts from the OpenAPI export; native signals (phase H: car audio
   `car_connected`, OS activity recognition, dev build).
 
